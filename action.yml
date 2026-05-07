@@ -1,0 +1,193 @@
+name: fairpipe Fairness Validator
+description: >
+  Run fairpipe validate in CI/CD — computes fairness metrics, writes a markdown
+  report to the job summary, and optionally fails the workflow when a demographic
+  parity threshold is exceeded.
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  csv:
+    description: >
+      Path to the data file (CSV or Parquet: .csv, .parquet, .pq),
+      relative to the repository root.
+    required: true
+
+  y-true:
+    description: Column name for ground-truth labels.
+    required: true
+
+  sensitive:
+    description: >
+      Sensitive attribute column name(s). Comma-separated for multiple
+      attributes, e.g. "gender,race".
+    required: true
+
+  y-pred:
+    description: Column name for predicted labels (classification).
+    required: false
+    default: ""
+
+  score:
+    description: Column name for predicted scores (regression / ranking).
+    required: false
+    default: ""
+
+  threshold:
+    description: >
+      Fairness threshold for demographic parity difference. The action sets
+      passed=false and optionally exits 1 when DPD exceeds this value.
+    required: false
+    default: "0.05"
+
+  fail-on-violation:
+    description: >
+      Set to "true" to exit 1 when the threshold is exceeded (default).
+      Set to "false" to surface the result without failing the workflow.
+    required: false
+    default: "true"
+
+  fairpipe-version:
+    description: >
+      fairpipe version to install. Use "latest" for the newest release or
+      pin to a specific version such as "0.6.5".
+    required: false
+    default: "latest"
+
+  with-ci:
+    description: Compute bootstrap confidence intervals for reported metrics.
+    required: false
+    default: "true"
+
+  min-group-size:
+    description: Minimum number of samples required per sensitive group.
+    required: false
+    default: "30"
+
+outputs:
+  passed:
+    description: '"true" if DPD is within threshold, "false" otherwise.'
+    value: ${{ steps.fairpipe-run.outputs.passed }}
+
+  dpd:
+    description: Demographic parity difference as a string (4 decimal places), or "N/A".
+    value: ${{ steps.fairpipe-run.outputs.dpd }}
+
+  report-path:
+    description: Absolute path to the written markdown report file.
+    value: ${{ steps.fairpipe-run.outputs.report-path }}
+
+runs:
+  using: "composite"
+  steps:
+    # -----------------------------------------------------------------------
+    # Step 1: Set up Python
+    # -----------------------------------------------------------------------
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    # -----------------------------------------------------------------------
+    # Step 2: Install fairpipe
+    # -----------------------------------------------------------------------
+    - name: Install fairpipe
+      shell: bash
+      env:
+        FAIRPIPE_VERSION: ${{ inputs.fairpipe-version }}
+      run: |
+        if [ "$FAIRPIPE_VERSION" = "latest" ]; then
+          pip install fairpipe --quiet
+        else
+          pip install "fairpipe==${FAIRPIPE_VERSION}" --quiet
+        fi
+
+    # -----------------------------------------------------------------------
+    # Step 3: Run fairpipe validate, parse outputs, write summary
+    # -----------------------------------------------------------------------
+    - name: Run fairpipe validate
+      id: fairpipe-run
+      shell: bash
+      env:
+        FP_CSV:       ${{ inputs.csv }}
+        FP_Y_TRUE:    ${{ inputs.y-true }}
+        FP_SENSITIVE: ${{ inputs.sensitive }}
+        FP_Y_PRED:    ${{ inputs.y-pred }}
+        FP_SCORE:     ${{ inputs.score }}
+        FP_THRESHOLD: ${{ inputs.threshold }}
+        FP_FAIL:      ${{ inputs.fail-on-violation }}
+        FP_WITH_CI:   ${{ inputs.with-ci }}
+        FP_MIN_GROUP: ${{ inputs.min-group-size }}
+      run: |
+        REPORT_PATH="${GITHUB_WORKSPACE}/fairpipe-report.md"
+
+        # Build argument array — no eval, no injection risk
+        ARGS=(--csv "$FP_CSV" --y-true "$FP_Y_TRUE")
+
+        # Convert comma-separated sensitive attributes to multiple --sensitive flags
+        IFS=',' read -ra ATTRS <<< "$FP_SENSITIVE"
+        for attr in "${ATTRS[@]}"; do
+          attr="$(echo "$attr" | xargs)"  # trim surrounding whitespace
+          ARGS+=(--sensitive "$attr")
+        done
+
+        ARGS+=(--min-group-size "$FP_MIN_GROUP")
+
+        [ -n "$FP_Y_PRED" ] && ARGS+=(--y-pred "$FP_Y_PRED")
+        [ -n "$FP_SCORE"  ] && ARGS+=(--score  "$FP_SCORE")
+        [ "$FP_WITH_CI" = "true" ] && ARGS+=(--with-ci)
+
+        ARGS+=(--out "$REPORT_PATH")
+
+        # Capture exit code without immediately failing the step
+        set +e
+        fairpipe validate "${ARGS[@]}"
+        VALIDATE_EXIT=$?
+        set -e
+
+        # Parse DPD from the markdown report table.
+        # The report renders metric names with underscores: `demographic_parity_difference`
+        # Use -E with '.' wildcard to handle any separator variant.
+        DPD=$(grep -iE "demographic.parity.difference" "$REPORT_PATH" \
+              | grep -oP '[-+]?[0-9]*\.?[0-9]+' | head -1)
+        [ -z "$DPD" ] && DPD="N/A"
+
+        # Threshold comparison — fairpipe validate always exits 0, so the action
+        # owns the pass/fail decision based on DPD vs threshold.
+        FAIRPIPE_EXIT=$VALIDATE_EXIT
+        if [ "$DPD" != "N/A" ]; then
+          ABOVE=$(python3 -c "print('yes' if float('${DPD}') > float('${FP_THRESHOLD}') else 'no')")
+          [ "$ABOVE" = "yes" ] && FAIRPIPE_EXIT=1
+        fi
+
+        # Set step outputs
+        echo "passed=$([ $FAIRPIPE_EXIT -eq 0 ] && echo 'true' || echo 'false')" >> "$GITHUB_OUTPUT"
+        echo "dpd=${DPD}" >> "$GITHUB_OUTPUT"
+        echo "report-path=${REPORT_PATH}" >> "$GITHUB_OUTPUT"
+
+        # Write job summary
+        if [ $FAIRPIPE_EXIT -eq 0 ]; then STATUS="✅ PASSED"; else STATUS="❌ FAILED"; fi
+
+        cat >> "$GITHUB_STEP_SUMMARY" << EOF
+        ## 🛡️ fairpipe Fairness Report
+
+        **Status:** ${STATUS}
+        **Metric:** Demographic Parity Difference = \`${DPD}\`
+        **Threshold:** \`${FP_THRESHOLD}\`
+
+        EOF
+
+        cat "$REPORT_PATH" >> "$GITHUB_STEP_SUMMARY"
+
+        cat >> "$GITHUB_STEP_SUMMARY" << 'ENDSUMMARY'
+
+        ---
+        *Powered by [fairpipe](https://github.com/JobCollins/fairness_pipeline_dev_toolkit)*
+        ENDSUMMARY
+
+        # Final exit — respect fail-on-violation
+        if [ "$FP_FAIL" = "true" ] && [ $FAIRPIPE_EXIT -ne 0 ]; then
+          exit 1
+        fi
+        exit 0

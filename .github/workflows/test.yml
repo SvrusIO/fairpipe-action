@@ -1,0 +1,178 @@
+name: Test fairpipe Action
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Smoke test: classification with y-pred
+  # ---------------------------------------------------------------------------
+  test-classification:
+    name: Classification smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate synthetic predictions CSV
+        run: |
+          python3 - <<'EOF'
+          import csv, random, pathlib
+          random.seed(42)
+          rows = [["y_true", "y_pred", "gender"]]
+          for i in range(200):
+              rows.append([random.randint(0, 1), random.randint(0, 1),
+                           random.choice(["M", "F"])])
+          pathlib.Path("test_data").mkdir(exist_ok=True)
+          with open("test_data/clf.csv", "w", newline="") as f:
+              csv.writer(f).writerows(rows)
+          EOF
+
+      - name: Run fairpipe action (classification)
+        id: fairness
+        uses: ./
+        with:
+          csv: test_data/clf.csv
+          y-true: y_true
+          y-pred: y_pred
+          sensitive: gender
+          threshold: "0.99"       # wide threshold so the test always passes
+          fail-on-violation: "false"
+          with-ci: "false"        # skip CI for speed in tests
+          min-group-size: "10"
+
+      - name: Verify outputs
+        run: |
+          echo "passed=${{ steps.fairness.outputs.passed }}"
+          echo "dpd=${{ steps.fairness.outputs.dpd }}"
+          echo "report=${{ steps.fairness.outputs.report-path }}"
+          test -f "${{ steps.fairness.outputs.report-path }}"
+
+  # ---------------------------------------------------------------------------
+  # Smoke test: regression with score column
+  # ---------------------------------------------------------------------------
+  test-regression:
+    name: Regression smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate synthetic scores CSV
+        run: |
+          python3 - <<'EOF'
+          import csv, random, pathlib
+          random.seed(0)
+          rows = [["actual", "score", "age_group"]]
+          for i in range(200):
+              rows.append([round(random.uniform(0, 1), 3),
+                           round(random.uniform(0, 1), 3),
+                           random.choice(["young", "old"])])
+          pathlib.Path("test_data").mkdir(exist_ok=True)
+          with open("test_data/reg.csv", "w", newline="") as f:
+              csv.writer(f).writerows(rows)
+          EOF
+
+      - name: Run fairpipe action (regression)
+        id: fairness
+        uses: ./
+        with:
+          csv: test_data/reg.csv
+          y-true: actual
+          score: score
+          sensitive: age_group
+          threshold: "0.99"
+          fail-on-violation: "false"
+          with-ci: "false"
+          min-group-size: "10"
+
+      - name: Verify outputs
+        run: |
+          echo "passed=${{ steps.fairness.outputs.passed }}"
+          echo "dpd=${{ steps.fairness.outputs.dpd }}"
+          test -f "${{ steps.fairness.outputs.report-path }}"
+
+  # ---------------------------------------------------------------------------
+  # Smoke test: multiple sensitive attributes (comma-separated)
+  # ---------------------------------------------------------------------------
+  test-multi-sensitive:
+    name: Multi-sensitive smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate multi-attribute CSV
+        run: |
+          python3 - <<'EOF'
+          import csv, random, pathlib
+          random.seed(7)
+          rows = [["y_true", "y_pred", "gender", "race"]]
+          for i in range(400):
+              rows.append([random.randint(0, 1), random.randint(0, 1),
+                           random.choice(["M", "F"]),
+                           random.choice(["A", "B", "C"])])
+          pathlib.Path("test_data").mkdir(exist_ok=True)
+          with open("test_data/multi.csv", "w", newline="") as f:
+              csv.writer(f).writerows(rows)
+          EOF
+
+      - name: Run fairpipe action (multi-sensitive)
+        id: fairness
+        uses: ./
+        with:
+          csv: test_data/multi.csv
+          y-true: y_true
+          y-pred: y_pred
+          sensitive: "gender, race"
+          threshold: "0.99"
+          fail-on-violation: "false"
+          with-ci: "false"
+          min-group-size: "10"
+
+      - name: Verify outputs
+        run: |
+          echo "passed=${{ steps.fairness.outputs.passed }}"
+          test -f "${{ steps.fairness.outputs.report-path }}"
+
+  # ---------------------------------------------------------------------------
+  # Pin-version test: verify explicit fairpipe version installs correctly
+  # ---------------------------------------------------------------------------
+  test-pinned-version:
+    name: Pinned version test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate CSV
+        run: |
+          python3 - <<'EOF'
+          import csv, random, pathlib
+          random.seed(1)
+          rows = [["y_true", "y_pred", "group"]]
+          for i in range(100):
+              rows.append([random.randint(0, 1), random.randint(0, 1),
+                           random.choice(["X", "Y"])])
+          pathlib.Path("test_data").mkdir(exist_ok=True)
+          with open("test_data/pinned.csv", "w", newline="") as f:
+              csv.writer(f).writerows(rows)
+          EOF
+
+      - name: Run fairpipe action (pinned version)
+        id: fairness
+        uses: ./
+        with:
+          csv: test_data/pinned.csv
+          y-true: y_true
+          y-pred: y_pred
+          sensitive: group
+          threshold: "0.99"
+          fail-on-violation: "false"
+          with-ci: "false"
+          min-group-size: "10"
+          fairpipe-version: "0.6.5"
+
+      - name: Verify outputs
+        run: |
+          echo "passed=${{ steps.fairness.outputs.passed }}"
+          test -f "${{ steps.fairness.outputs.report-path }}"

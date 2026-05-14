@@ -1,8 +1,8 @@
 name: fairpipe Fairness Validator
 description: >
   Run fairpipe validate in CI/CD — computes fairness metrics, writes a markdown
-  report to the job summary, and optionally fails the workflow when a demographic
-  parity threshold is exceeded.
+  report to the job summary, and optionally fails the workflow when a fairness
+  threshold is exceeded.
 branding:
   icon: shield
   color: blue
@@ -36,10 +36,19 @@ inputs:
 
   threshold:
     description: >
-      Fairness threshold for demographic parity difference. The action sets
-      passed=false and optionally exits 1 when DPD exceeds this value.
+      Fairness threshold applied to the selected metric. The action sets
+      passed=false and optionally exits 1 when the metric exceeds this value.
     required: false
     default: "0.05"
+
+  metric:
+    description: >
+      Fairness metric to evaluate against threshold.
+      Options: demographic_parity_difference, equalized_odds_difference.
+      Defaults to equalized_odds_difference, which is more appropriate for
+      high-stakes classification tasks as it controls for actual outcomes.
+    required: false
+    default: "equalized_odds_difference"
 
   fail-on-violation:
     description: >
@@ -51,7 +60,8 @@ inputs:
   fairpipe-version:
     description: >
       fairpipe version to install. Use "latest" for the newest release or
-      pin to a specific version such as "0.6.5".
+      pin to a specific version such as "0.7.3". Requires v0.7.3 or higher
+      for --threshold and --metric CLI support.
     required: false
     default: "latest"
 
@@ -67,11 +77,15 @@ inputs:
 
 outputs:
   passed:
-    description: '"true" if DPD is within threshold, "false" otherwise.'
+    description: '"true" if the selected metric is within threshold, "false" otherwise.'
     value: ${{ steps.fairpipe-run.outputs.passed }}
 
+  metric-value:
+    description: Value of the evaluated fairness metric as a string (4 decimal places), or "N/A".
+    value: ${{ steps.fairpipe-run.outputs.metric-value }}
+
   dpd:
-    description: Demographic parity difference as a string (4 decimal places), or "N/A".
+    description: Demographic parity difference as a string (4 decimal places), or "N/A". Deprecated — use metric-value.
     value: ${{ steps.fairpipe-run.outputs.dpd }}
 
   report-path:
@@ -116,6 +130,7 @@ runs:
         FP_Y_PRED:    ${{ inputs.y-pred }}
         FP_SCORE:     ${{ inputs.score }}
         FP_THRESHOLD: ${{ inputs.threshold }}
+        FP_METRIC:    ${{ inputs.metric }}
         FP_FAIL:      ${{ inputs.fail-on-violation }}
         FP_WITH_CI:   ${{ inputs.with-ci }}
         FP_MIN_GROUP: ${{ inputs.min-group-size }}
@@ -133,6 +148,8 @@ runs:
         done
 
         ARGS+=(--min-group-size "$FP_MIN_GROUP")
+        ARGS+=(--threshold "$FP_THRESHOLD")
+        ARGS+=(--metric "$FP_METRIC")
 
         [ -n "$FP_Y_PRED" ] && ARGS+=(--y-pred "$FP_Y_PRED")
         [ -n "$FP_SCORE"  ] && ARGS+=(--score  "$FP_SCORE")
@@ -146,25 +163,28 @@ runs:
         VALIDATE_EXIT=$?
         set -e
 
-        # Parse DPD from the markdown report table.
-        # The report renders metric names with underscores: `demographic_parity_difference`
-        # Use -E with '.' wildcard to handle any separator variant.
-        DPD=$(grep -iE "demographic.parity.difference" "$REPORT_PATH" \
-              | grep -oP '[-+]?[0-9]*\.?[0-9]+' | head -1)
-        [ -z "$DPD" ] && DPD="N/A"
-
-        # Threshold comparison — fairpipe validate always exits 0, so the action
-        # owns the pass/fail decision based on DPD vs threshold.
+        # CLI owns pass/fail — exit code 1 means metric exceeded threshold
         FAIRPIPE_EXIT=$VALIDATE_EXIT
-        if [ "$DPD" != "N/A" ]; then
-          ABOVE=$(python3 -c "print('yes' if float('${DPD}') > float('${FP_THRESHOLD}') else 'no')")
-          [ "$ABOVE" = "yes" ] && FAIRPIPE_EXIT=1
+
+        # Parse the selected metric value from the report
+        METRIC_VALUE=$(grep -iE "${FP_METRIC}" "$REPORT_PATH" \
+          | grep -oP '[-+]?[0-9]*\.?[0-9]+' | head -1)
+        [ -z "$METRIC_VALUE" ] && METRIC_VALUE="N/A"
+
+        # Keep DPD separately for backward compatibility
+        if echo "$FP_METRIC" | grep -qi "demographic_parity"; then
+          DPD="$METRIC_VALUE"
+        else
+          DPD=$(grep -iE "demographic.parity.difference" "$REPORT_PATH" \
+            | grep -oP '[-+]?[0-9]*\.?[0-9]+' | head -1)
+          [ -z "$DPD" ] && DPD="N/A"
         fi
 
         # Set step outputs
         echo "passed=$([ $FAIRPIPE_EXIT -eq 0 ] && echo 'true' || echo 'false')" >> "$GITHUB_OUTPUT"
-        echo "dpd=${DPD}" >> "$GITHUB_OUTPUT"
-        echo "report-path=${REPORT_PATH}" >> "$GITHUB_OUTPUT"
+        echo "metric-value=${METRIC_VALUE}" >> "$GITHUB_OUTPUT"
+        echo "dpd=${DPD}"                   >> "$GITHUB_OUTPUT"
+        echo "report-path=${REPORT_PATH}"   >> "$GITHUB_OUTPUT"
 
         # Write job summary
         if [ $FAIRPIPE_EXIT -eq 0 ]; then STATUS="✅ PASSED"; else STATUS="❌ FAILED"; fi
@@ -173,7 +193,8 @@ runs:
         ## 🛡️ fairpipe Fairness Report
 
         **Status:** ${STATUS}
-        **Metric:** Demographic Parity Difference = \`${DPD}\`
+        **Metric:** \`${FP_METRIC}\` = \`${METRIC_VALUE}\`
+        **DPD:** \`${DPD}\`
         **Threshold:** \`${FP_THRESHOLD}\`
 
         EOF

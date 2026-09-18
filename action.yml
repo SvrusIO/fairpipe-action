@@ -1,28 +1,59 @@
 name: fairpipe Fairness Validator
 description: >
-  Run fairpipe validate in CI/CD — computes fairness metrics, writes a markdown
-  report to the job summary, and optionally fails the workflow when a fairness
-  threshold is exceeded.
+  Run fairpipe in CI/CD — computes fairness metrics, writes a markdown report to
+  the job summary, and optionally fails the workflow when a fairness threshold is
+  exceeded. Gates tabular predictions with `fairpipe validate`, or LLM fairness
+  evals with `fairpipe llm-eval` when `config` is set.
 branding:
   icon: shield
   color: blue
 
 inputs:
+  # ---------------------------------------------------------------------------
+  # Mode selection
+  #
+  # `config` set  -> llm-fairness-check mode (fairpipe llm-eval)
+  # `config` unset -> fairness-check mode    (fairpipe validate)
+  #
+  # The two modes are mutually exclusive. Setting both `config` and `csv`, or
+  # neither, is a usage error.
+  # ---------------------------------------------------------------------------
+  config:
+    description: >
+      Path to an llm_eval YAML config, relative to the repository root. Setting
+      this selects llm-fairness-check mode and runs `fairpipe llm-eval` instead
+      of `fairpipe validate`. Requires fairpipe >= 0.10.0.
+
+      The config should set `cache_dir` to a committed recorded cache so the
+      check replays offline: fairpipe enables replay-only whenever `cache_dir`
+      is present, and a cache miss then fails rather than calling a provider.
+      There is deliberately no input for this — replay is a property of your
+      config, not of the Action.
+    required: false
+    default: ""
+
+  # ---------------------------------------------------------------------------
+  # fairness-check inputs (tabular — `fairpipe validate`)
+  # ---------------------------------------------------------------------------
   csv:
     description: >
       Path to the data file (CSV or Parquet: .csv, .parquet, .pq),
-      relative to the repository root.
-    required: true
+      relative to the repository root. Required in fairness-check mode;
+      ignored in llm-fairness-check mode.
+    required: false
+    default: ""
 
   y-true:
-    description: Column name for ground-truth labels.
-    required: true
+    description: Column name for ground-truth labels. Required in fairness-check mode.
+    required: false
+    default: ""
 
   sensitive:
     description: >
       Sensitive attribute column name(s). Comma-separated for multiple
-      attributes, e.g. "gender,race".
-    required: true
+      attributes, e.g. "gender,race". Required in fairness-check mode.
+    required: false
+    default: ""
 
   y-pred:
     description: Column name for predicted labels (classification).
@@ -34,69 +65,162 @@ inputs:
     required: false
     default: ""
 
+  with-ci:
+    description: Compute bootstrap confidence intervals for reported metrics.
+    required: false
+    default: "true"
+
+  # ---------------------------------------------------------------------------
+  # Shared inputs (both modes)
+  # ---------------------------------------------------------------------------
   threshold:
     description: >
       Fairness threshold applied to the selected metric. The action sets
       passed=false and optionally exits 1 when the metric exceeds this value.
+
+      Defaults to "0.05" in fairness-check mode. In llm-fairness-check mode it
+      has no default: leave it unset to report without gating on a number. Note
+      that an unset threshold is not "always pass" — a caveated (illustrative)
+      metric still exits 3.
     required: false
-    default: "0.05"
+    default: ""
 
   metric:
     description: >
-      Fairness metric to evaluate against threshold.
-      Options: demographic_parity_difference, equalized_odds_difference.
-      Defaults to equalized_odds_difference, which is more appropriate for
-      high-stakes classification tasks as it controls for actual outcomes.
+      Metric to evaluate against threshold.
+
+      fairness-check mode: demographic_parity_difference or
+      equalized_odds_difference. Defaults to equalized_odds_difference, which is
+      more appropriate for high-stakes classification tasks as it controls for
+      actual outcomes.
+
+      llm-fairness-check mode: an llm_eval evaluator key, e.g.
+      counterfactual_fairness_divergence, refusal_rate_disparity,
+      toxicity_sentiment_disparity, stereotype_association_score. It must be one
+      of the evaluators your config declares. Required when `threshold` is set.
+      No default — the tabular default is not a valid LLM evaluator.
     required: false
-    default: "equalized_odds_difference"
+    default: ""
+
+  min-group-size:
+    description: >
+      Minimum number of samples required per group. Defaults to 30 in
+      fairness-check mode. In llm-fairness-check mode it is left unset so
+      fairpipe's LLM default of 5 applies — the tabular default of 30 would be
+      six times stricter and push small recorded fixtures to nan.
+    required: false
+    default: ""
 
   fail-on-violation:
     description: >
       Set to "true" to exit 1 when the threshold is exceeded (default).
       Set to "false" to surface the result without failing the workflow.
+
+      In llm-fairness-check mode this remaps exit 1 to 0 only. Usage errors (2)
+      and illustrative results (3) are never remapped.
     required: false
     default: "true"
 
   fairpipe-version:
     description: >
       fairpipe version to install. Use "latest" for the newest release or
-      pin to a specific version such as "0.7.3". Requires v0.7.3 or higher
-      for --threshold and --metric CLI support.
+      pin to a specific version such as "0.10.0". Requires v0.7.3 or higher
+      for --threshold and --metric CLI support in fairness-check mode, and
+      v0.10.0 or higher for llm-fairness-check mode.
     required: false
     default: "latest"
 
-  with-ci:
-    description: Compute bootstrap confidence intervals for reported metrics.
-    required: false
-    default: "true"
-
-  min-group-size:
-    description: Minimum number of samples required per sensitive group.
-    required: false
-    default: "30"
-
 outputs:
+  # All outputs come from the `collect` step rather than from whichever mode
+  # step ran. Merging two mutually exclusive steps with `||` would be wrong:
+  # GitHub coerces `0` to false in conditionals, so `exit-code=0` — the ordinary
+  # pass case — would fall through to the skipped step's empty value.
   passed:
-    description: '"true" if the selected metric is within threshold, "false" otherwise.'
-    value: ${{ steps.fairpipe-run.outputs.passed }}
+    description: >
+      '"true"' if the selected metric is within threshold, '"false"' otherwise.
+      Empty string when there is no boolean answer — an illustrative result or a
+      usage error — mirroring the toolkit's `passed=null`. Branch on
+      `gate-status` when you need to tell those apart.
+    value: ${{ steps.collect.outputs.passed }}
+
+  gate-status:
+    description: >
+      Canonical gate status, mirroring the toolkit's `gate_status`:
+      "pass", "fail", "illustrative", or "usage-error".
+    value: ${{ steps.collect.outputs.gate-status }}
+
+  exit-code:
+    description: >
+      Raw exit code from the underlying fairpipe CLI, before `fail-on-violation`
+      is applied: 0 pass, 1 threshold miss, 2 usage error, 3 illustrative.
+    value: ${{ steps.collect.outputs.exit-code }}
+
+  mode:
+    description: '"fairness-check" or "llm-fairness-check".'
+    value: ${{ steps.collect.outputs.mode }}
 
   metric-value:
-    description: Value of the evaluated fairness metric as a string (4 decimal places), or "N/A".
-    value: ${{ steps.fairpipe-run.outputs.metric-value }}
+    description: Value of the evaluated fairness metric as a string, or "N/A".
+    value: ${{ steps.collect.outputs.metric-value }}
 
   dpd:
-    description: Demographic parity difference as a string (4 decimal places), or "N/A". Deprecated — use metric-value.
-    value: ${{ steps.fairpipe-run.outputs.dpd }}
+    description: >
+      Demographic parity difference as a string (4 decimal places), or "N/A".
+      Deprecated — use metric-value. Always "N/A" in llm-fairness-check mode.
+    value: ${{ steps.collect.outputs.dpd }}
 
   report-path:
-    description: Absolute path to the written markdown report file.
-    value: ${{ steps.fairpipe-run.outputs.report-path }}
+    description: >
+      Absolute path to the written markdown report file. Not written when the
+      run ends in a usage error (exit 2), because fairpipe fails before
+      rendering a report.
+    value: ${{ steps.collect.outputs.report-path }}
 
 runs:
   using: "composite"
   steps:
     # -----------------------------------------------------------------------
-    # Step 1: Set up Python
+    # Step 1: Resolve mode and validate mutually exclusive inputs
+    # -----------------------------------------------------------------------
+    - name: Resolve mode
+      id: mode
+      shell: bash
+      env:
+        FP_CONFIG:    ${{ inputs.config }}
+        FP_CSV:       ${{ inputs.csv }}
+        FP_Y_TRUE:    ${{ inputs.y-true }}
+        FP_SENSITIVE: ${{ inputs.sensitive }}
+      run: |
+        if [ -n "$FP_CONFIG" ] && [ -n "$FP_CSV" ]; then
+          echo "::error title=fairpipe: ambiguous mode::Both 'config' and 'csv' are set. 'config' selects llm-fairness-check mode (fairpipe llm-eval); 'csv' selects fairness-check mode (fairpipe validate). Set exactly one."
+          exit 2
+        fi
+
+        if [ -z "$FP_CONFIG" ] && [ -z "$FP_CSV" ]; then
+          echo "::error title=fairpipe: no mode selected::Set 'csv' for fairness-check mode, or 'config' for llm-fairness-check mode."
+          exit 2
+        fi
+
+        if [ -n "$FP_CONFIG" ]; then
+          echo "mode=llm-fairness-check" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # fairness-check mode requires the tabular column inputs. These were
+        # declared required:true before llm-fairness-check mode existed; they
+        # are now conditionally required, so validate them here.
+        MISSING=()
+        [ -z "$FP_Y_TRUE" ]    && MISSING+=("y-true")
+        [ -z "$FP_SENSITIVE" ] && MISSING+=("sensitive")
+        if [ ${#MISSING[@]} -gt 0 ]; then
+          echo "::error title=fairpipe: missing required inputs::fairness-check mode requires: ${MISSING[*]}"
+          exit 2
+        fi
+
+        echo "mode=fairness-check" >> "$GITHUB_OUTPUT"
+
+    # -----------------------------------------------------------------------
+    # Step 2: Set up Python
     # -----------------------------------------------------------------------
     - name: Set up Python
       uses: actions/setup-python@v5
@@ -104,24 +228,76 @@ runs:
         python-version: "3.11"
 
     # -----------------------------------------------------------------------
-    # Step 2: Install fairpipe
+    # Step 3: Install fairpipe
+    #
+    # The [llm] extra pulls the openai/anthropic SDKs. A replay-only LLM eval
+    # never constructs a provider client, so a bare install is enough and is
+    # measurably lighter. Only a job that has opted into live provider calls
+    # needs the extra, so key the decision off the same kill-switch fairpipe
+    # itself reads.
     # -----------------------------------------------------------------------
     - name: Install fairpipe
       shell: bash
       env:
         FAIRPIPE_VERSION: ${{ inputs.fairpipe-version }}
+        FP_MODE: ${{ steps.mode.outputs.mode }}
       run: |
+        EXTRAS=""
+        if [ "$FP_MODE" = "llm-fairness-check" ]; then
+          ALLOW="$(printf '%s' "${FAIRPIPE_LLM_ALLOW_LIVE:-}" | tr '[:upper:]' '[:lower:]')"
+          FORBID="$(printf '%s' "${FAIRPIPE_LLM_FORBID_LIVE:-}" | tr '[:upper:]' '[:lower:]')"
+          case "$ALLOW" in 1|true|yes|on) EXTRAS="[llm]" ;; esac
+          case "$FORBID" in 0|false|no|off) EXTRAS="[llm]" ;; esac
+          if [ -n "$EXTRAS" ]; then
+            echo "Live provider calls are enabled — installing fairpipe${EXTRAS} for the provider SDKs."
+          else
+            echo "No live-call opt-in detected — installing bare fairpipe (replay-only needs no provider SDK)."
+          fi
+        fi
+
         if [ "$FAIRPIPE_VERSION" = "latest" ]; then
-          pip install fairpipe --quiet
+          pip install "fairpipe${EXTRAS}" --quiet
         else
-          pip install "fairpipe==${FAIRPIPE_VERSION}" --quiet
+          pip install "fairpipe${EXTRAS}==${FAIRPIPE_VERSION}" --quiet
+        fi
+
+        # llm-eval only exists from 0.10.0. Fail with a direct message rather
+        # than letting argparse report an unrecognised subcommand.
+        if [ "$FP_MODE" = "llm-fairness-check" ]; then
+          python - <<'PYEOF'
+        import sys
+        from importlib.metadata import version
+
+        raw = version("fairpipe")
+        parts = []
+        for chunk in raw.split(".")[:3]:
+            digits = ""
+            for ch in chunk:
+                if not ch.isdigit():
+                    break
+                digits += ch
+            parts.append(int(digits) if digits else 0)
+        while len(parts) < 3:
+            parts.append(0)
+
+        if tuple(parts) < (0, 10, 0):
+            print(
+                "::error title=fairpipe: version too old for llm-fairness-check::"
+                f"llm-fairness-check mode needs the 'llm-eval' subcommand, added in "
+                f"fairpipe 0.10.0, but {raw} is installed. Set fairpipe-version to "
+                f"0.10.0 or later (or 'latest')."
+            )
+            sys.exit(2)
+        print(f"fairpipe {raw} supports llm-eval.")
+        PYEOF
         fi
 
     # -----------------------------------------------------------------------
-    # Step 3: Run fairpipe validate, parse outputs, write summary
+    # Step 4a: fairness-check — run fairpipe validate, parse outputs, summarise
     # -----------------------------------------------------------------------
     - name: Run fairpipe validate
       id: fairpipe-run
+      if: steps.mode.outputs.mode == 'fairness-check'
       shell: bash
       env:
         FP_CSV:       ${{ inputs.csv }}
@@ -136,6 +312,13 @@ runs:
         FP_MIN_GROUP: ${{ inputs.min-group-size }}
       run: |
         REPORT_PATH="${GITHUB_WORKSPACE}/fairpipe-report.md"
+
+        # Mode-specific defaults. These live here rather than on the input so
+        # llm-fairness-check mode can tell "unset" from "explicitly chosen" —
+        # the tabular defaults are not valid LLM values.
+        [ -z "$FP_THRESHOLD" ] && FP_THRESHOLD="0.05"
+        [ -z "$FP_METRIC" ]    && FP_METRIC="equalized_odds_difference"
+        [ -z "$FP_MIN_GROUP" ] && FP_MIN_GROUP="30"
 
         # Build argument array — no eval, no injection risk
         ARGS=(--csv "$FP_CSV" --y-true "$FP_Y_TRUE")
@@ -182,9 +365,11 @@ runs:
 
         # Set step outputs
         echo "passed=$([ $FAIRPIPE_EXIT -eq 0 ] && echo 'true' || echo 'false')" >> "$GITHUB_OUTPUT"
-        echo "metric-value=${METRIC_VALUE}" >> "$GITHUB_OUTPUT"
-        echo "dpd=${DPD}"                   >> "$GITHUB_OUTPUT"
-        echo "report-path=${REPORT_PATH}"   >> "$GITHUB_OUTPUT"
+        echo "gate-status=$([ $FAIRPIPE_EXIT -eq 0 ] && echo 'pass' || echo 'fail')" >> "$GITHUB_OUTPUT"
+        echo "exit-code=${FAIRPIPE_EXIT}"    >> "$GITHUB_OUTPUT"
+        echo "metric-value=${METRIC_VALUE}"  >> "$GITHUB_OUTPUT"
+        echo "dpd=${DPD}"                    >> "$GITHUB_OUTPUT"
+        echo "report-path=${REPORT_PATH}"    >> "$GITHUB_OUTPUT"
 
         # Write job summary
         if [ $FAIRPIPE_EXIT -eq 0 ]; then STATUS="✅ PASSED"; else STATUS="❌ FAILED"; fi
@@ -212,3 +397,293 @@ runs:
           exit 1
         fi
         exit 0
+
+    # -----------------------------------------------------------------------
+    # Step 4b: llm-fairness-check — run fairpipe llm-eval, parse outputs,
+    #          annotate, summarise
+    #
+    # Unlike validate, this CLI has four meaningful exit codes and they must be
+    # distinguished *before* any pass/fail collapse:
+    #   0 pass / 1 threshold miss / 2 usage error / 3 illustrative
+    # -----------------------------------------------------------------------
+    - name: Run fairpipe llm-eval
+      id: fairpipe-llm-run
+      if: steps.mode.outputs.mode == 'llm-fairness-check'
+      shell: bash
+      env:
+        FP_CONFIG:    ${{ inputs.config }}
+        FP_THRESHOLD: ${{ inputs.threshold }}
+        FP_METRIC:    ${{ inputs.metric }}
+        FP_FAIL:      ${{ inputs.fail-on-violation }}
+        FP_WITH_CI:   ${{ inputs.with-ci }}
+        FP_MIN_GROUP: ${{ inputs.min-group-size }}
+      run: |
+        REPORT_PATH="${GITHUB_WORKSPACE}/fairpipe-llm-report.md"
+
+        # Build argument array — no eval, no injection risk.
+        # Every optional flag stays off unless explicitly set: --threshold is
+        # optional, and min-group-size deliberately falls through to fairpipe's
+        # LLM default of 5 rather than the tabular 30.
+        ARGS=(--config "$FP_CONFIG")
+        if [ -n "$FP_METRIC" ];    then ARGS+=(--metric "$FP_METRIC"); fi
+        if [ -n "$FP_THRESHOLD" ]; then ARGS+=(--threshold "$FP_THRESHOLD"); fi
+        if [ -n "$FP_MIN_GROUP" ]; then ARGS+=(--min-group-size "$FP_MIN_GROUP"); fi
+        if [ "$FP_WITH_CI" = "true" ]; then ARGS+=(--with-ci); fi
+        ARGS+=(--report-md "$REPORT_PATH")
+
+        # Capture exit code without immediately failing the step
+        set +e
+        fairpipe llm-eval "${ARGS[@]}"
+        LLM_EXIT=$?
+        set -e
+
+        echo "fairpipe llm-eval exited ${LLM_EXIT}"
+
+        # Parse, annotate and summarise in Python. The report is a markdown
+        # table; parsing it with grep -P is not portable (BSD/macOS grep has no
+        # -P and silently matches nothing), so do it here instead.
+        LLM_EXIT="$LLM_EXIT" REPORT_PATH="$REPORT_PATH" python3 - <<'PYEOF'
+        import os
+        import re
+
+        exit_code = int(os.environ["LLM_EXIT"])
+        report_path = os.environ["REPORT_PATH"]
+        metric = os.environ.get("FP_METRIC", "").strip()
+        threshold = os.environ.get("FP_THRESHOLD", "").strip()
+        config = os.environ.get("FP_CONFIG", "").strip()
+
+        GATE_STATUS = {0: "pass", 1: "fail", 2: "usage-error", 3: "illustrative"}
+        # Mirrors the toolkit's PASSED_BY_GATE: illustrative is null, not false.
+        PASSED = {0: "true", 1: "false", 2: "", 3: ""}
+
+        gate_status = GATE_STATUS.get(exit_code, "usage-error")
+        passed = PASSED.get(exit_code, "")
+
+        report = ""
+        if os.path.isfile(report_path):
+            with open(report_path, encoding="utf-8") as fh:
+                report = fh.read()
+
+        def parse_metric_rows(text):
+            """Return {metric_name: value_string} from the report's metric table."""
+            rows = {}
+            for line in text.splitlines():
+                line = line.strip()
+                if not line.startswith("|"):
+                    continue
+                cells = [c.strip() for c in line.strip("|").split("|")]
+                if len(cells) < 2:
+                    continue
+                name = cells[0].strip("`").strip()
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                    continue
+                # A trailing '*' marks a caveated (demo) value.
+                value = cells[1].rstrip("*").strip()
+                if re.fullmatch(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?|nan", value):
+                    rows[name] = value
+            return rows
+
+        rows = parse_metric_rows(report)
+        if metric and metric in rows:
+            metric_value = rows[metric]
+        elif rows:
+            metric_value = next(iter(rows.values()))
+        else:
+            metric_value = "N/A"
+
+        def parse_caveats(text):
+            """Return the report's '## Caveats' bullet lines, if any."""
+            out = []
+            in_section = False
+            for line in text.splitlines():
+                if line.startswith("## "):
+                    in_section = line.strip().lower() == "## caveats"
+                    continue
+                if in_section and line.strip().startswith("- "):
+                    out.append(line.strip()[2:].strip())
+            return out
+
+        caveats = parse_caveats(report)
+
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+            fh.write(f"passed={passed}\n")
+            fh.write(f"gate-status={gate_status}\n")
+            fh.write(f"exit-code={exit_code}\n")
+            fh.write(f"metric-value={metric_value}\n")
+            fh.write("dpd=N/A\n")
+            fh.write(f"report-path={report_path if report else ''}\n")
+
+        # --- Annotations -----------------------------------------------------
+        # Exit 3 is not a fairness failure and must not read like one.
+        if exit_code == 3:
+            detail = " ".join(caveats) if caveats else (
+                "The gated metric carries a non-null caveat from its recorded-cache manifest."
+            )
+            print(
+                "::warning title=fairpipe: illustrative result, not a fairness failure::"
+                f"The gated metric is caveated, so fairpipe reports gate_status=illustrative "
+                f"(exit 3) rather than a pass or a fail — even though the value "
+                f"({metric_value}) would have passed the threshold. This is a demo or "
+                f"otherwise non-evidential fixture: do not read it as evidence of "
+                f"group-level disparity, and do not read it as a clean bill of health. "
+                f"The check fails closed by design. {detail} "
+                "To gate on a real number, point cache_dir at a non-illustrative "
+                "recorded cache (manifest.json without \"illustrative\": true)."
+            )
+
+        # Exit 2 is overloaded — the code alone cannot say which cause applies,
+        # so name them all rather than sending someone hunting a typo.
+        if exit_code == 2:
+            print(
+                "::error title=fairpipe: llm-eval usage error (exit 2)::"
+                "fairpipe llm-eval exited 2. This single code covers several distinct "
+                "causes and cannot distinguish them, so check all of these: "
+                "(1) a cache miss in replay-only mode — the config sets cache_dir but an "
+                "entry is absent, which happens when the prompts, provider, model or "
+                "params changed since the cache was recorded; "
+                "(2) live provider calls blocked by the kill-switch — live HTTP is "
+                "forbidden by default, so a config without cache_dir needs "
+                "FAIRPIPE_LLM_ALLOW_LIVE=1 and a provider key in the step env; "
+                "(3) threshold set without metric — 'metric' is required whenever "
+                "'threshold' is set; "
+                "(4) the metric is not one of the evaluators declared in the config; "
+                "(5) the config file is missing or fails validation. "
+                f"Config: {config or '(unset)'}; metric: {metric or '(unset)'}; "
+                f"threshold: {threshold or '(unset)'}. "
+                "The step log above this annotation carries the specific error."
+            )
+
+        # --- Job summary -----------------------------------------------------
+        STATUS = {
+            0: "✅ PASSED",
+            1: "❌ FAILED — threshold exceeded",
+            2: "🚨 USAGE ERROR — check did not run to completion",
+            3: "⚠️ ILLUSTRATIVE — caveated fixture, not a fairness verdict",
+        }
+
+        lines = [
+            "## 🛡️ fairpipe LLM Fairness Report",
+            "",
+            f"**Status:** {STATUS.get(exit_code, STATUS[2])}",
+            f"**Gate status:** `{gate_status}` (exit {exit_code})",
+            f"**Config:** `{config}`",
+            f"**Metric:** `{metric or '(all evaluators)'}` = `{metric_value}`",
+            f"**Threshold:** `{threshold or '(not gated on a value)'}`",
+            "",
+        ]
+
+        if exit_code == 3:
+            lines += [
+                "> [!WARNING]",
+                "> **This is not a fairness failure, and not a pass either.**",
+                "> The gated metric carries a caveat, so fairpipe returns"
+                " `gate_status=illustrative`",
+                "> even when the number would pass the threshold. The value above is"
+                " illustrative:",
+                "> it is not evidence of group-level disparity, and its absence is not"
+                " evidence of fairness.",
+                "> The check fails closed so a demo fixture can never be mistaken for a"
+                " green gate.",
+                "",
+            ]
+            if caveats:
+                lines.append("**Caveats reported by fairpipe:**")
+                lines.append("")
+                lines += [f"- {c}" for c in caveats]
+                lines.append("")
+
+        if exit_code == 2:
+            lines += [
+                "> [!CAUTION]",
+                "> **The eval did not complete.** Exit 2 is overloaded: it covers a cache"
+                " miss in",
+                "> replay-only mode, a live call blocked by the"
+                " `FAIRPIPE_LLM_ALLOW_LIVE` kill-switch,",
+                "> `threshold` without `metric`, a metric absent from the config's"
+                " evaluators, and an",
+                "> unreadable config. The step log names the specific cause; no report"
+                " was rendered.",
+                "",
+            ]
+
+        if report:
+            lines += [report, ""]
+
+        lines += [
+            "---",
+            "*Powered by"
+            " [fairpipe](https://github.com/JobCollins/fairness_pipeline_dev_toolkit)*",
+        ]
+
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        PYEOF
+
+        # Final exit. fail-on-violation remaps a threshold miss only; usage (2)
+        # and illustrative (3) are never remapped and propagate their own code.
+        if [ "$LLM_EXIT" -eq 1 ] && [ "$FP_FAIL" != "true" ]; then
+          echo "fail-on-violation is not 'true' — reporting the threshold miss without failing."
+          exit 0
+        fi
+        exit "$LLM_EXIT"
+
+    # -----------------------------------------------------------------------
+    # Step 5: Collect outputs from whichever mode ran
+    #
+    # Runs even when the mode step failed, so a caller using
+    # `continue-on-error` can still read gate-status and exit-code.
+    # -----------------------------------------------------------------------
+    - name: Collect outputs
+      id: collect
+      if: always()
+      shell: bash
+      env:
+        FP_MODE:      ${{ steps.mode.outputs.mode }}
+        TAB_PASSED:   ${{ steps.fairpipe-run.outputs.passed }}
+        TAB_GATE:     ${{ steps.fairpipe-run.outputs.gate-status }}
+        TAB_EXIT:     ${{ steps.fairpipe-run.outputs.exit-code }}
+        TAB_VALUE:    ${{ steps.fairpipe-run.outputs.metric-value }}
+        TAB_DPD:      ${{ steps.fairpipe-run.outputs.dpd }}
+        TAB_REPORT:   ${{ steps.fairpipe-run.outputs.report-path }}
+        LLM_PASSED:   ${{ steps.fairpipe-llm-run.outputs.passed }}
+        LLM_GATE:     ${{ steps.fairpipe-llm-run.outputs.gate-status }}
+        LLM_EXIT_OUT: ${{ steps.fairpipe-llm-run.outputs.exit-code }}
+        LLM_VALUE:    ${{ steps.fairpipe-llm-run.outputs.metric-value }}
+        LLM_REPORT:   ${{ steps.fairpipe-llm-run.outputs.report-path }}
+      run: |
+        if [ "$FP_MODE" = "llm-fairness-check" ]; then
+          PASSED="$LLM_PASSED"
+          GATE="$LLM_GATE"
+          EXIT_CODE="$LLM_EXIT_OUT"
+          VALUE="$LLM_VALUE"
+          DPD="N/A"
+          REPORT="$LLM_REPORT"
+        else
+          PASSED="$TAB_PASSED"
+          GATE="$TAB_GATE"
+          EXIT_CODE="$TAB_EXIT"
+          VALUE="$TAB_VALUE"
+          DPD="$TAB_DPD"
+          REPORT="$TAB_REPORT"
+        fi
+
+        # The mode step itself can fail before either run step exists (both
+        # modes selected, or neither). Report that as a usage error rather than
+        # emitting empty outputs.
+        if [ -z "$GATE" ]; then
+          GATE="usage-error"
+          PASSED=""
+          [ -z "$EXIT_CODE" ] && EXIT_CODE="2"
+          [ -z "$VALUE" ] && VALUE="N/A"
+          [ -z "$DPD" ] && DPD="N/A"
+        fi
+
+        {
+          echo "mode=${FP_MODE}"
+          echo "passed=${PASSED}"
+          echo "gate-status=${GATE}"
+          echo "exit-code=${EXIT_CODE}"
+          echo "metric-value=${VALUE}"
+          echo "dpd=${DPD}"
+          echo "report-path=${REPORT}"
+        } >> "$GITHUB_OUTPUT"

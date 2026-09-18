@@ -18,7 +18,7 @@ The mode is inferred from which input you set. Setting both `csv` and `config`, 
 ### `fairness-check` — tabular predictions
 
 ```yaml
-- uses: SvrusIO/fairpipe-action@v1
+- uses: SvrusIO/fairpipe-action@v2
   with:
     csv: data/predictions.csv
     y-true: y_true
@@ -30,15 +30,15 @@ The mode is inferred from which input you set. Setting both `csv` and `config`, 
 ### `llm-fairness-check` — LLM fairness evals
 
 ```yaml
-- uses: SvrusIO/fairpipe-action@v1
+- uses: SvrusIO/fairpipe-action@v2
   with:
     config: llm_eval.yml
-    metric: "counterfactual_fairness_divergence"
+    metric: "refusal_rate_disparity"
     threshold: "0.25"
     fail-on-violation: "true"
 ```
 
-Requires fairpipe **0.10.0 or later**, which is when `fairpipe llm-eval` was added. The action checks this after install and fails with a direct message rather than letting the CLI report an unrecognised subcommand.
+Requires fairpipe **0.10.0 or later**, which is when `fairpipe llm-eval` was added. The action checks this after install and fails with a direct message rather than letting the CLI report an unrecognised subcommand. The examples gate `refusal_rate_disparity` so a caveated (illustrative) fixture can return exit 3 on released 0.10.0 — `counterfactual_fairness_divergence` does not attach caveats until a later toolkit release.
 
 ---
 
@@ -69,7 +69,7 @@ Requires fairpipe **0.10.0 or later**, which is when `fairpipe llm-eval` was add
 | `fail-on-violation` | no | `"true"` | `"true"` exits 1 when the threshold is exceeded. `"false"` surfaces the result without failing. In `llm-fairness-check` mode this remaps exit 1 only — usage errors (2) and illustrative results (3) are never remapped. |
 | `min-group-size` | no | `""` | Minimum samples per group. Defaults to `30` in `fairness-check` mode. Left unset in `llm-fairness-check` mode so fairpipe's LLM default of `5` applies; `30` would be six times stricter and push small recorded fixtures to `nan`. |
 | `with-ci` | no | `"true"` | Compute bootstrap confidence intervals for reported metrics. |
-| `fairpipe-version` | no | `"latest"` | fairpipe version to install. Use `"latest"` for the newest release or pin a specific version such as `"0.10.0"`. Needs `0.7.3`+ for `--threshold`/`--metric` in `fairness-check` mode, and `0.10.0`+ for `llm-fairness-check` mode. |
+| `fairpipe-version` | no | `"latest"` | fairpipe version to install. Use `"latest"` for the newest release or pin a specific version such as `"0.10.0"`. Needs `0.8.0`+ for `--threshold`/`--metric` in `fairness-check` mode, and `0.10.0`+ for `llm-fairness-check` mode. |
 
 ---
 
@@ -102,7 +102,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: SvrusIO/fairpipe-action@v1
+      - uses: SvrusIO/fairpipe-action@v2
         with:
           csv: data/predictions.csv
           y-true: y_true
@@ -114,7 +114,7 @@ jobs:
 ### Classification — multiple sensitive attributes
 
 ```yaml
-- uses: SvrusIO/fairpipe-action@v1
+- uses: SvrusIO/fairpipe-action@v2
   with:
     csv: data/predictions.csv
     y-true: y_true
@@ -126,7 +126,7 @@ jobs:
 ### Regression — score-based fairness
 
 ```yaml
-- uses: SvrusIO/fairpipe-action@v1
+- uses: SvrusIO/fairpipe-action@v2
   with:
     csv: data/scores.csv
     y-true: actual_score
@@ -138,19 +138,19 @@ jobs:
 ### Pin a specific fairpipe version
 
 ```yaml
-- uses: SvrusIO/fairpipe-action@v1
+- uses: SvrusIO/fairpipe-action@v2
   with:
     csv: data/predictions.csv
     y-true: y_true
     y-pred: y_pred
     sensitive: gender
-    fairpipe-version: "0.6.5"
+    fairpipe-version: "0.8.0"
 ```
 
 ### Audit-only mode — report without failing
 
 ```yaml
-- uses: SvrusIO/fairpipe-action@v1
+- uses: SvrusIO/fairpipe-action@v2
   with:
     csv: data/predictions.csv
     y-true: y_true
@@ -164,7 +164,7 @@ jobs:
 ```yaml
 - name: Run fairness check
   id: fairness
-  uses: SvrusIO/fairpipe-action@v1
+  uses: SvrusIO/fairpipe-action@v2
   with:
     csv: data/predictions.csv
     y-true: y_true
@@ -181,7 +181,7 @@ jobs:
 ### Parquet input
 
 ```yaml
-- uses: SvrusIO/fairpipe-action@v1
+- uses: SvrusIO/fairpipe-action@v2
   with:
     csv: data/predictions.parquet
     y-true: y_true
@@ -205,7 +205,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: SvrusIO/fairpipe-action@v1
+      - uses: SvrusIO/fairpipe-action@v2
         with:
           config: llm_eval.yml
           metric: "refusal_rate_disparity"
@@ -263,13 +263,13 @@ Live HTTP is **forbidden by default** in fairpipe — that is the safe default, 
 A live job must set both the kill-switch and the provider key as `env:` on the step:
 
 ```yaml
-- uses: SvrusIO/fairpipe-action@v1
+- uses: SvrusIO/fairpipe-action@v2
   env:
     FAIRPIPE_LLM_ALLOW_LIVE: "1"
     ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
   with:
     config: llm_eval.yml
-    metric: "counterfactual_fairness_divergence"
+    metric: "refusal_rate_disparity"
     threshold: "0.25"
     fail-on-violation: "true"
 ```
@@ -282,7 +282,7 @@ Credentials are passed as `env:`, never as inputs — action inputs are echoed i
 - name: LLM fairness check
   id: llm
   continue-on-error: true
-  uses: SvrusIO/fairpipe-action@v1
+  uses: SvrusIO/fairpipe-action@v2
   with:
     config: llm_eval.yml
     metric: "refusal_rate_disparity"
@@ -333,7 +333,7 @@ When the action runs, it appends a fairness report to the [GitHub Actions job su
 
 ## Version compatibility
 
-The examples here use `@v1`. Check that the tag you pin actually contains the features you use — `v1` currently predates both the `metric` input and `llm-fairness-check` mode. Pin a commit SHA if you need certainty.
+The examples here use `@v2` (llm-fairness-check mode, merge `b629800`). Use `@v1` only if you want the last pre-mode release (`68c2bb7` — tabular `metric` / `metric-value`, no LLM mode). `@v1.0.0` remains an immutable pin of the original composite action at `d8fe950`.
 
 ---
 

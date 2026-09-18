@@ -89,10 +89,10 @@ inputs:
     description: >
       Metric to evaluate against threshold.
 
-      fairness-check mode: demographic_parity_difference or
-      equalized_odds_difference. Defaults to equalized_odds_difference, which is
-      more appropriate for high-stakes classification tasks as it controls for
-      actual outcomes.
+      fairness-check mode: demographic_parity_difference,
+      equalized_odds_difference, or mae_parity_difference (score-based /
+      regression). When unset: equalized_odds_difference if y-pred is set,
+      mae_parity_difference if only score is set.
 
       llm-fairness-check mode: an llm_eval evaluator key, e.g.
       counterfactual_fairness_divergence, refusal_rate_disparity,
@@ -124,7 +124,7 @@ inputs:
   fairpipe-version:
     description: >
       fairpipe version to install. Use "latest" for the newest release or
-      pin to a specific version such as "0.10.0". Requires v0.7.3 or higher
+      pin to a specific version such as "0.10.0". Requires v0.8.0 or higher
       for --threshold and --metric CLI support in fairness-check mode, and
       v0.10.0 or higher for llm-fairness-check mode.
     required: false
@@ -317,8 +317,16 @@ runs:
         # llm-fairness-check mode can tell "unset" from "explicitly chosen" —
         # the tabular defaults are not valid LLM values.
         [ -z "$FP_THRESHOLD" ] && FP_THRESHOLD="0.05"
-        [ -z "$FP_METRIC" ]    && FP_METRIC="equalized_odds_difference"
         [ -z "$FP_MIN_GROUP" ] && FP_MIN_GROUP="30"
+        # Metric default depends on which prediction column the caller provided:
+        # equalized odds needs y-pred; score-only / regression uses MAE parity.
+        if [ -z "$FP_METRIC" ]; then
+          if [ -n "$FP_SCORE" ] && [ -z "$FP_Y_PRED" ]; then
+            FP_METRIC="mae_parity_difference"
+          else
+            FP_METRIC="equalized_odds_difference"
+          fi
+        fi
 
         # Build argument array — no eval, no injection risk
         ARGS=(--csv "$FP_CSV" --y-true "$FP_Y_TRUE")

@@ -82,6 +82,7 @@ jobs:
           y-true: actual
           score: score
           sensitive: age_group
+          metric: mae_parity_difference
           threshold: "0.99"
           fail-on-violation: "false"
           with-ci: "false"
@@ -170,7 +171,9 @@ jobs:
           fail-on-violation: "false"
           with-ci: "false"
           min-group-size: "10"
-          fairpipe-version: "0.6.5"
+          # 0.8.0 is the first release with --threshold / --metric.
+          # 0.6.5 / 0.7.x reject those flags; the action always passes them.
+          fairpipe-version: "0.8.0"
 
       - name: Verify outputs
         run: |

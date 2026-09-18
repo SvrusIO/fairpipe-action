@@ -82,6 +82,7 @@ jobs:
           y-true: actual
           score: score
           sensitive: age_group
+          metric: mae_parity_difference
           threshold: "0.99"
           fail-on-violation: "false"
           with-ci: "false"
@@ -170,9 +171,337 @@ jobs:
           fail-on-violation: "false"
           with-ci: "false"
           min-group-size: "10"
-          fairpipe-version: "0.6.5"
+          # 0.8.0 is the first release with --threshold / --metric.
+          # 0.6.5 / 0.7.x reject those flags; the action always passes them.
+          fairpipe-version: "0.8.0"
 
       - name: Verify outputs
         run: |
           echo "passed=${{ steps.fairness.outputs.passed }}"
           test -f "${{ steps.fairness.outputs.report-path }}"
+
+  # ===========================================================================
+  # llm-fairness-check mode
+  #
+  # Every job below is offline: tests/make_llm_fixture.py writes a recorded
+  # response cache and the llm_eval config that replays it, so no provider key
+  # is needed and no HTTP happens. fairpipe turns on replay-only whenever
+  # cache_dir is set, which is why these are deterministic and free.
+  #
+  # Unlike the tabular jobs, these assert a *specific* exit code, because
+  # llm-eval has four meaningful ones (0/1/2/3) and collapsing them would defeat
+  # the point. `continue-on-error: true` lets the workflow inspect a failing
+  # step's `outcome` and outputs instead of aborting the job.
+  # ===========================================================================
+
+  # ---------------------------------------------------------------------------
+  # Gate passes: exit 0
+  # ---------------------------------------------------------------------------
+  test-llm-pass:
+    name: LLM gate pass (exit 0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate offline llm_eval fixture
+        run: python3 tests/make_llm_fixture.py --out-dir llm_fixture --variant clean
+
+      - name: Run fairpipe action (llm-fairness-check)
+        id: llm
+        uses: ./
+        with:
+          config: llm_fixture/llm_eval.yml
+          metric: refusal_rate_disparity
+          threshold: "0.5"
+
+      - name: Assert pass
+        run: |
+          test "${{ steps.llm.outcome }}"            = "success"
+          test "${{ steps.llm.outputs.mode }}"        = "llm-fairness-check"
+          test "${{ steps.llm.outputs.gate-status }}" = "pass"
+          test "${{ steps.llm.outputs.exit-code }}"   = "0"
+          test "${{ steps.llm.outputs.passed }}"      = "true"
+          test -f "${{ steps.llm.outputs.report-path }}"
+          # The fixture has 5 prompts per group, exactly fairpipe's LLM minimum.
+          # A finite value proves the tabular min-group-size default of 30 was
+          # not passed through — 30 would exclude both groups and yield nan.
+          test "${{ steps.llm.outputs.metric-value }}" != "nan"
+          test "${{ steps.llm.outputs.metric-value }}" != "N/A"
+
+  # ---------------------------------------------------------------------------
+  # Threshold miss: exit 1, and fail-on-violation remaps it to 0
+  # ---------------------------------------------------------------------------
+  test-llm-threshold-miss:
+    name: LLM threshold miss (exit 1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate offline llm_eval fixture (one group always refuses)
+        run: python3 tests/make_llm_fixture.py --out-dir llm_fixture --variant disparity
+
+      - name: Run fairpipe action (expect threshold miss)
+        id: llm
+        continue-on-error: true
+        uses: ./
+        with:
+          config: llm_fixture/llm_eval.yml
+          metric: refusal_rate_disparity
+          threshold: "0.1"
+
+      - name: Assert threshold miss fails the step
+        run: |
+          test "${{ steps.llm.outcome }}"             = "failure"
+          test "${{ steps.llm.outputs.gate-status }}" = "fail"
+          test "${{ steps.llm.outputs.exit-code }}"   = "1"
+          test "${{ steps.llm.outputs.passed }}"      = "false"
+          # Disparity is 1.0 here; nan would mean min-group-size excluded the groups.
+          test "${{ steps.llm.outputs.metric-value }}" != "nan"
+
+      - name: Run again with fail-on-violation=false
+        id: llm_soft
+        uses: ./
+        with:
+          config: llm_fixture/llm_eval.yml
+          metric: refusal_rate_disparity
+          threshold: "0.1"
+          fail-on-violation: "false"
+
+      - name: Assert exit 1 is remapped but the verdict is still reported
+        run: |
+          test "${{ steps.llm_soft.outcome }}"             = "success"
+          test "${{ steps.llm_soft.outputs.gate-status }}" = "fail"
+          test "${{ steps.llm_soft.outputs.exit-code }}"   = "1"
+          test "${{ steps.llm_soft.outputs.passed }}"      = "false"
+
+  # ---------------------------------------------------------------------------
+  # Illustrative: exit 3, fails closed, and is NOT remapped
+  # ---------------------------------------------------------------------------
+  test-llm-illustrative:
+    name: LLM illustrative fixture (exit 3)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate offline llm_eval fixture marked illustrative
+        run: |
+          python3 tests/make_llm_fixture.py \
+            --out-dir llm_fixture --variant clean --illustrative
+
+      - name: Run fairpipe action (threshold the value would pass)
+        id: llm
+        continue-on-error: true
+        uses: ./
+        with:
+          config: llm_fixture/llm_eval.yml
+          metric: refusal_rate_disparity
+          threshold: "0.5"
+
+      - name: Assert illustrative fails closed and is distinguishable
+        run: |
+          # Fails closed: a caveated fixture must never read as a green gate.
+          test "${{ steps.llm.outcome }}"             = "failure"
+          # ...but it is reported as its own state, not as a threshold miss.
+          test "${{ steps.llm.outputs.gate-status }}" = "illustrative"
+          test "${{ steps.llm.outputs.exit-code }}"   = "3"
+          # passed is empty, mirroring the toolkit's passed=null.
+          test -z "${{ steps.llm.outputs.passed }}"
+          # The value itself would have passed 0.5 — exit 3 wins regardless.
+          test "${{ steps.llm.outputs.metric-value }}" = "0.000000"
+
+      - name: Assert the caveat reaches the report
+        run: |
+          REPORT="${{ steps.llm.outputs.report-path }}"
+          test -f "$REPORT"
+          grep -q '## Caveats' "$REPORT"
+          grep -q 'Not evidence of refusal-rate disparity' "$REPORT"
+          echo "--- report ---"
+          cat "$REPORT"
+
+      - name: Assert fail-on-violation=false does NOT remap exit 3
+        id: llm_soft
+        continue-on-error: true
+        uses: ./
+        with:
+          config: llm_fixture/llm_eval.yml
+          metric: refusal_rate_disparity
+          threshold: "0.5"
+          fail-on-violation: "false"
+
+      - name: Verify exit 3 survived fail-on-violation=false
+        run: |
+          test "${{ steps.llm_soft.outcome }}"             = "failure"
+          test "${{ steps.llm_soft.outputs.gate-status }}" = "illustrative"
+          test "${{ steps.llm_soft.outputs.exit-code }}"   = "3"
+
+      - name: Assert an unset threshold still exits 3
+        id: llm_nothr
+        continue-on-error: true
+        uses: ./
+        with:
+          config: llm_fixture/llm_eval.yml
+
+      - name: Verify caveat gating without metric or threshold
+        run: |
+          test "${{ steps.llm_nothr.outcome }}"             = "failure"
+          test "${{ steps.llm_nothr.outputs.gate-status }}" = "illustrative"
+          test "${{ steps.llm_nothr.outputs.exit-code }}"   = "3"
+
+  # ---------------------------------------------------------------------------
+  # Usage errors: exit 2, never remapped
+  # ---------------------------------------------------------------------------
+  test-llm-usage-errors:
+    name: LLM usage errors (exit 2)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate fixtures (populated and empty caches)
+        run: |
+          python3 tests/make_llm_fixture.py --out-dir llm_fixture --variant clean
+          python3 tests/make_llm_fixture.py --out-dir llm_empty   --variant empty
+
+      # The most likely real-world CI failure: config points at a cache_dir
+      # whose entries do not match the prompts being evaluated.
+      - name: Cache miss in replay-only mode
+        id: miss
+        continue-on-error: true
+        uses: ./
+        with:
+          config: llm_empty/llm_eval.yml
+          metric: refusal_rate_disparity
+          threshold: "0.5"
+
+      - name: Assert cache miss is a usage error
+        run: |
+          test "${{ steps.miss.outcome }}"             = "failure"
+          test "${{ steps.miss.outputs.gate-status }}" = "usage-error"
+          test "${{ steps.miss.outputs.exit-code }}"   = "2"
+          test -z "${{ steps.miss.outputs.passed }}"
+
+      - name: Threshold without metric
+        id: nometric
+        continue-on-error: true
+        uses: ./
+        with:
+          config: llm_fixture/llm_eval.yml
+          threshold: "0.5"
+
+      - name: Assert threshold-without-metric is a usage error
+        run: |
+          test "${{ steps.nometric.outcome }}"             = "failure"
+          test "${{ steps.nometric.outputs.gate-status }}" = "usage-error"
+          test "${{ steps.nometric.outputs.exit-code }}"   = "2"
+
+      # The tabular default metric is not a valid LLM evaluator, so this also
+      # guards against that default ever leaking into llm-fairness-check mode.
+      - name: Metric absent from the config's evaluators
+        id: badmetric
+        continue-on-error: true
+        uses: ./
+        with:
+          config: llm_fixture/llm_eval.yml
+          metric: equalized_odds_difference
+          threshold: "0.5"
+
+      - name: Assert unknown metric is a usage error
+        run: |
+          test "${{ steps.badmetric.outcome }}"             = "failure"
+          test "${{ steps.badmetric.outputs.gate-status }}" = "usage-error"
+          test "${{ steps.badmetric.outputs.exit-code }}"   = "2"
+
+      - name: Assert usage error is not remapped by fail-on-violation=false
+        id: miss_soft
+        continue-on-error: true
+        uses: ./
+        with:
+          config: llm_empty/llm_eval.yml
+          metric: refusal_rate_disparity
+          threshold: "0.5"
+          fail-on-violation: "false"
+
+      - name: Verify exit 2 survived fail-on-violation=false
+        run: |
+          test "${{ steps.miss_soft.outcome }}"           = "failure"
+          test "${{ steps.miss_soft.outputs.exit-code }}" = "2"
+
+  # ---------------------------------------------------------------------------
+  # Mode selection is inferred from `config`; ambiguity is rejected
+  # ---------------------------------------------------------------------------
+  test-mode-selection:
+    name: Mode selection errors
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate fixture and a tabular CSV
+        run: |
+          python3 tests/make_llm_fixture.py --out-dir llm_fixture --variant clean
+          mkdir -p test_data
+          printf 'y_true,y_pred,gender\n1,1,M\n0,0,F\n' > test_data/tiny.csv
+
+      - name: Both config and csv set
+        id: both
+        continue-on-error: true
+        uses: ./
+        with:
+          config: llm_fixture/llm_eval.yml
+          csv: test_data/tiny.csv
+          y-true: y_true
+          sensitive: gender
+
+      - name: Assert ambiguous mode is rejected
+        run: |
+          test "${{ steps.both.outcome }}"             = "failure"
+          test "${{ steps.both.outputs.gate-status }}" = "usage-error"
+
+      - name: Neither config nor csv set
+        id: neither
+        continue-on-error: true
+        uses: ./
+        with:
+          threshold: "0.5"
+
+      - name: Assert missing mode is rejected
+        run: |
+          test "${{ steps.neither.outcome }}"             = "failure"
+          test "${{ steps.neither.outputs.gate-status }}" = "usage-error"
+
+      - name: csv without the required column inputs
+        id: incomplete
+        continue-on-error: true
+        uses: ./
+        with:
+          csv: test_data/tiny.csv
+
+      - name: Assert incomplete tabular inputs are rejected
+        run: |
+          test "${{ steps.incomplete.outcome }}"             = "failure"
+          test "${{ steps.incomplete.outputs.gate-status }}" = "usage-error"
+
+  # ---------------------------------------------------------------------------
+  # A fairpipe pin without `llm-eval` must fail with a direct message
+  # ---------------------------------------------------------------------------
+  test-llm-version-floor:
+    name: LLM mode rejects pre-0.10.0 pin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate offline llm_eval fixture
+        run: python3 tests/make_llm_fixture.py --out-dir llm_fixture --variant clean
+
+      - name: Pin a fairpipe that predates llm-eval
+        id: old
+        continue-on-error: true
+        uses: ./
+        with:
+          config: llm_fixture/llm_eval.yml
+          metric: refusal_rate_disparity
+          threshold: "0.5"
+          fairpipe-version: "0.9.1"
+
+      - name: Assert the version floor is enforced
+        run: |
+          test "${{ steps.old.outcome }}" = "failure"
+

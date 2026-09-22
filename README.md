@@ -66,7 +66,7 @@ Requires fairpipe **0.10.0 or later**, which is when `fairpipe llm-eval` was add
 |-------|----------|---------|-------------|
 | `metric` | see below | `""` | Metric to gate. In `fairness-check` mode, `demographic_parity_difference` or `equalized_odds_difference`, defaulting to `equalized_odds_difference`. In `llm-fairness-check` mode, an evaluator key your config declares — required whenever `threshold` is set, and with no default, because the tabular default is not a valid LLM evaluator. |
 | `threshold` | no | `""` | Fairness threshold for the selected metric. Defaults to `"0.05"` in `fairness-check` mode. In `llm-fairness-check` mode it has no default: leave it unset to report without gating on a number. |
-| `fail-on-violation` | no | `"true"` | `"true"` exits 1 when the threshold is exceeded. `"false"` surfaces the result without failing. In `llm-fairness-check` mode this remaps exit 1 only — usage errors (2) and illustrative results (3) are never remapped. |
+| `fail-on-violation` | no | `"true"` | `"true"` exits 1 when the threshold is exceeded. `"false"` surfaces the result without failing. In `llm-fairness-check` mode this remaps exit 1 only — usage errors (2), illustrative results (3), and undefined results (4) are never remapped. |
 | `min-group-size` | no | `""` | Minimum samples per group. Defaults to `30` in `fairness-check` mode. Left unset in `llm-fairness-check` mode so fairpipe's LLM default of `5` applies; `30` would be six times stricter and push small recorded fixtures to `nan`. |
 | `with-ci` | no | `"true"` | Compute bootstrap confidence intervals for reported metrics. |
 | `fairpipe-version` | no | `"latest"` | fairpipe version to install. Use `"latest"` for the newest release or pin a specific version such as `"0.10.0"`. Needs `0.8.0`+ for `--threshold`/`--metric` in `fairness-check` mode, and `0.10.0`+ for `llm-fairness-check` mode. |
@@ -77,9 +77,9 @@ Requires fairpipe **0.10.0 or later**, which is when `fairpipe llm-eval` was add
 
 | Output | Description |
 |--------|-------------|
-| `passed` | `"true"` if the selected metric is within threshold, `"false"` otherwise. **Empty string** when there is no boolean answer — an illustrative result or a usage error — mirroring fairpipe's `passed=null`. Branch on `gate-status` to tell those apart. |
-| `gate-status` | `pass`, `fail`, `illustrative`, or `usage-error`. Mirrors fairpipe's canonical `gate_status`. |
-| `exit-code` | Raw exit code from the fairpipe CLI, before `fail-on-violation` is applied: `0` pass, `1` threshold miss, `2` usage error, `3` illustrative. |
+| `passed` | `"true"` if the selected metric is within threshold, `"false"` otherwise. **Empty string** when there is no boolean answer — an illustrative result, an undefined (insufficient-evidence) result, or a usage error — mirroring fairpipe's `passed=null`. Branch on `gate-status` to tell those apart. |
+| `gate-status` | `pass`, `fail`, `illustrative`, `undefined`, or `usage-error`. Mirrors fairpipe's canonical `gate_status`. |
+| `exit-code` | Raw exit code from the fairpipe CLI, before `fail-on-violation` is applied: `0` pass, `1` threshold miss, `2` usage error, `3` illustrative, `4` undefined. |
 | `mode` | `fairness-check` or `llm-fairness-check`. |
 | `metric-value` | Value of the evaluated metric as a string, or `"N/A"`. |
 | `dpd` | Demographic parity difference as a string (4 decimal places), or `"N/A"`. Deprecated — use `metric-value`. Always `"N/A"` in `llm-fairness-check` mode. |
@@ -215,16 +215,17 @@ jobs:
 
 ### Exit codes
 
-`fairpipe llm-eval` has four meaningful exit codes, and this action keeps them distinct rather than collapsing them into pass/fail. A red check can be decoded without opening the report:
+`fairpipe llm-eval` has five meaningful exit codes, and this action keeps them distinct rather than collapsing them into pass/fail. A red check can be decoded without opening the report:
 
 | Exit | `gate-status` | `passed` | Step | Meaning |
 |------|---------------|----------|------|---------|
-| 0 | `pass` | `"true"` | ✅ passes | Threshold met, or no threshold, on a non-caveated metric |
+| 0 | `pass` | `"true"` | ✅ passes | Threshold met, or no threshold, on a finite non-caveated metric |
 | 1 | `fail` | `"false"` | ❌ fails | Threshold miss on a **non-caveated** gated metric |
 | 2 | `usage-error` | `""` | 🚨 fails | Config or environment problem — the eval never completed |
 | 3 | `illustrative` | `""` | ⚠️ fails | Gated metric carries a caveat — **even if the number would pass** |
+| 4 | `undefined` | `""` | 🚫 fails | Gated metric is non-finite (insufficient evidence; typically `min_group_size`) |
 
-`fail-on-violation: "false"` remaps exit 1 to 0. Usage errors (2) and illustrative results (3) are never remapped.
+`fail-on-violation: "false"` remaps exit 1 to 0. Usage errors (2), illustrative results (3), and undefined results (4) are never remapped.
 
 ### Exit 3 is not a fairness failure
 
@@ -237,6 +238,12 @@ The action **fails closed** on exit 3 — but makes it distinguishable, so nobod
 - the job summary carries the caveat and the full report
 
 To gate on a real number, point `cache_dir` at a cache whose `manifest.json` does not set `"illustrative": true`.
+
+### Exit 4 is not a pass
+
+When every eligible group falls below `min_group_size` (or fewer than two remain), fairpipe declines to produce a finite disparity number. That used to read as a green gate; it now exits **4** with `gate-status=undefined` and an empty `passed`.
+
+The action **fails closed** on exit 4 — with an annotation naming `min_group_size` as the likely cause — so an undersized audit cannot be mistaken for a clean bill of health.
 
 ### Exit 2 covers several causes
 
@@ -294,6 +301,7 @@ Credentials are passed as `env:`, never as inputs — action inputs are echoed i
       pass)         echo "Within threshold." ;;
       fail)         echo "Fairness regression — blocking."; exit 1 ;;
       illustrative) echo "Caveated fixture; not a verdict. Fix the fixture." ; exit 1 ;;
+      undefined)    echo "Insufficient evidence (likely min_group_size)."; exit 1 ;;
       usage-error)  echo "Check never ran — see the annotation."; exit 1 ;;
     esac
 ```
@@ -316,10 +324,10 @@ When the action runs, it appends a fairness report to the [GitHub Actions job su
 2. **Set up Python 3.11** using `actions/setup-python@v5`.
 3. **Install fairpipe** — the latest release or a pinned version. In `llm-fairness-check` mode the `[llm]` extra is added only when live calls are enabled, and the installed version is checked against the `0.10.0` floor.
 4. **Run the CLI** — `fairpipe validate` or `fairpipe llm-eval`, built from inputs with no shell injection risk: all inputs are passed via environment variables and expanded into a bash array.
-5. **Annotate** — a `::warning` for an illustrative result, a `::error` naming the possible causes of a usage error.
+5. **Annotate** — a `::warning` for an illustrative result, a `::error` for undefined (exit 4 / `min_group_size`) or naming the possible causes of a usage error.
 6. **Write the job summary** with the status, the gate status, any caveats, and the full report.
 7. **Set step outputs** (`passed`, `gate-status`, `exit-code`, `mode`, `metric-value`, `dpd`, `report-path`).
-8. **Exit** — `fail-on-violation: "true"` propagates a threshold miss. In `llm-fairness-check` mode the CLI's exit code is preserved, so usage (2) and illustrative (3) stay distinct and are never remapped.
+8. **Exit** — `fail-on-violation: "true"` propagates a threshold miss. In `llm-fairness-check` mode the CLI's exit code is preserved, so usage (2), illustrative (3), and undefined (4) stay distinct and are never remapped.
 
 ---
 

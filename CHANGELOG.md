@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **`undefined` gate status (exit 4):** maps fairpipe's non-finite / insufficient-evidence
+  result (typically `min_group_size`) to `gate-status=undefined` with empty `passed`, a
+  `::error` annotation naming the guard, and a job-summary caution. Without this mapping,
+  exit 4 would fall through the Action's unknown-exit fallback to `usage-error`.
+- Offline CI job `test-llm-undefined` (clean fixture + `min-group-size: "30"` → exit 4).
+  Temporarily pins that job alone to unreleased fairpipe via `FAIRPIPE_PIP_SPEC` (git
+  install from `SvrusIO/fAIr`); see the unpin issue. Other LLM jobs stay on PyPI `latest`.
+
+### Changed
+
+- `fail-on-violation: "false"` still remaps exit 1 only; exit 4 is never remapped.
+- Docs / outputs enumerate `undefined` alongside `pass` / `fail` / `illustrative` /
+  `usage-error`. Additive for callers that only handle 0–3; exhaustive `gate-status`
+  switches need a new arm.
+
+### Known issues
+
+- **Interim mislabel on `@v2`:** until a fairpipe release emits exit 4 *and* this Action
+  patch is what callers run (moved `@v2` tag or a `v3`), anyone using a pre-release
+  fairpipe through the current `@v2` composite still maps unknown exit 4 → `usage-error`.
+  The failure is real; the label is wrong. Patched Action `main` labels it `undefined`.
+
 ## [v2] — 2026-09-18
 
 Tagged at merge commit `b629800` (PR [#2](https://github.com/SvrusIO/fairpipe-action/pull/2)).

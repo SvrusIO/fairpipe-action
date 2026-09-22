@@ -81,7 +81,8 @@ inputs:
       Defaults to "0.05" in fairness-check mode. In llm-fairness-check mode it
       has no default: leave it unset to report without gating on a number. Note
       that an unset threshold is not "always pass" — a caveated (illustrative)
-      metric still exits 3.
+      metric still exits 3, and a non-finite metric (typically min_group_size)
+      still exits 4.
     required: false
     default: ""
 
@@ -116,8 +117,8 @@ inputs:
       Set to "true" to exit 1 when the threshold is exceeded (default).
       Set to "false" to surface the result without failing the workflow.
 
-      In llm-fairness-check mode this remaps exit 1 to 0 only. Usage errors (2)
-      and illustrative results (3) are never remapped.
+      In llm-fairness-check mode this remaps exit 1 to 0 only. Usage errors (2),
+      illustrative results (3), and undefined results (4) are never remapped.
     required: false
     default: "true"
 
@@ -138,21 +139,23 @@ outputs:
   passed:
     description: >
       '"true"' if the selected metric is within threshold, '"false"' otherwise.
-      Empty string when there is no boolean answer — an illustrative result or a
-      usage error — mirroring the toolkit's `passed=null`. Branch on
-      `gate-status` when you need to tell those apart.
+      Empty string when there is no boolean answer — an illustrative result, an
+      undefined (insufficient-evidence) result, or a usage error — mirroring the
+      toolkit's `passed=null`. Branch on `gate-status` when you need to tell
+      those apart.
     value: ${{ steps.collect.outputs.passed }}
 
   gate-status:
     description: >
       Canonical gate status, mirroring the toolkit's `gate_status`:
-      "pass", "fail", "illustrative", or "usage-error".
+      "pass", "fail", "illustrative", "undefined", or "usage-error".
     value: ${{ steps.collect.outputs.gate-status }}
 
   exit-code:
     description: >
       Raw exit code from the underlying fairpipe CLI, before `fail-on-violation`
-      is applied: 0 pass, 1 threshold miss, 2 usage error, 3 illustrative.
+      is applied: 0 pass, 1 threshold miss, 2 usage error, 3 illustrative,
+      4 undefined.
     value: ${{ steps.collect.outputs.exit-code }}
 
   mode:
@@ -255,7 +258,14 @@ runs:
           fi
         fi
 
-        if [ "$FAIRPIPE_VERSION" = "latest" ]; then
+        # FAIRPIPE_PIP_SPEC is an undocumented CI escape hatch (not a public input).
+        # Used only by test-llm-undefined to pin an unreleased fairpipe; do not
+        # document it as part of the Action contract — remove when that job
+        # returns to PyPI latest.
+        if [ -n "${FAIRPIPE_PIP_SPEC:-}" ]; then
+          echo "FAIRPIPE_PIP_SPEC is set — installing from that requirement (overrides fairpipe-version)."
+          pip install "$FAIRPIPE_PIP_SPEC" --quiet
+        elif [ "$FAIRPIPE_VERSION" = "latest" ]; then
           pip install "fairpipe${EXTRAS}" --quiet
         else
           pip install "fairpipe${EXTRAS}==${FAIRPIPE_VERSION}" --quiet
@@ -412,9 +422,9 @@ runs:
     # Step 4b: llm-fairness-check — run fairpipe llm-eval, parse outputs,
     #          annotate, summarise
     #
-    # Unlike validate, this CLI has four meaningful exit codes and they must be
+    # Unlike validate, this CLI has five meaningful exit codes and they must be
     # distinguished *before* any pass/fail collapse:
-    #   0 pass / 1 threshold miss / 2 usage error / 3 illustrative
+    #   0 pass / 1 threshold miss / 2 usage error / 3 illustrative / 4 undefined
     # -----------------------------------------------------------------------
     - name: Run fairpipe llm-eval
       id: fairpipe-llm-run
@@ -462,9 +472,15 @@ runs:
         threshold = os.environ.get("FP_THRESHOLD", "").strip()
         config = os.environ.get("FP_CONFIG", "").strip()
 
-        GATE_STATUS = {0: "pass", 1: "fail", 2: "usage-error", 3: "illustrative"}
-        # Mirrors the toolkit's PASSED_BY_GATE: illustrative is null, not false.
-        PASSED = {0: "true", 1: "false", 2: "", 3: ""}
+        GATE_STATUS = {
+            0: "pass",
+            1: "fail",
+            2: "usage-error",
+            3: "illustrative",
+            4: "undefined",
+        }
+        # Mirrors the toolkit's PASSED_BY_GATE: illustrative / undefined are null.
+        PASSED = {0: "true", 1: "false", 2: "", 3: "", 4: ""}
 
         gate_status = GATE_STATUS.get(exit_code, "usage-error")
         passed = PASSED.get(exit_code, "")
@@ -541,6 +557,21 @@ runs:
                 "recorded cache (manifest.json without \"illustrative\": true)."
             )
 
+        # Exit 4: insufficient evidence — the audit did not produce a number.
+        if exit_code == 4:
+            print(
+                "::error title=fairpipe: undefined metric (exit 4)::"
+                "fairpipe llm-eval exited 4 because the gated metric is undefined "
+                "(non-finite). A demographic group likely fell below min_group_size, "
+                "so every eligible group was excluded (or fewer than two remain) and "
+                "no disparity number was produced. This is not a pass and not a "
+                "threshold miss — the audit did not happen. Raise sample size or "
+                "lower min-group-size; use --allow-small-samples only for labelled "
+                "illustrative smoke tests. "
+                f"Config: {config or '(unset)'}; metric: {metric or '(unset)'}; "
+                f"threshold: {threshold or '(unset)'}; value: {metric_value}."
+            )
+
         # Exit 2 is overloaded — the code alone cannot say which cause applies,
         # so name them all rather than sending someone hunting a typo.
         if exit_code == 2:
@@ -569,6 +600,7 @@ runs:
             1: "❌ FAILED — threshold exceeded",
             2: "🚨 USAGE ERROR — check did not run to completion",
             3: "⚠️ ILLUSTRATIVE — caveated fixture, not a fairness verdict",
+            4: "🚫 UNDEFINED — insufficient evidence (likely min_group_size)",
         }
 
         lines = [
@@ -602,6 +634,17 @@ runs:
                 lines += [f"- {c}" for c in caveats]
                 lines.append("")
 
+        if exit_code == 4:
+            lines += [
+                "> [!CAUTION]",
+                "> **The metric is undefined — the audit did not produce a number.**",
+                "> fairpipe returns `gate_status=undefined` (exit 4) when the gated",
+                "> value is non-finite. A group likely fell below `min_group_size`.",
+                "> This is not a pass and not a threshold miss. Raise sample size or",
+                "> adjust `min-group-size`; do not treat a green check as evidence.",
+                "",
+            ]
+
         if exit_code == 2:
             lines += [
                 "> [!CAUTION]",
@@ -629,8 +672,8 @@ runs:
             fh.write("\n".join(lines) + "\n")
         PYEOF
 
-        # Final exit. fail-on-violation remaps a threshold miss only; usage (2)
-        # and illustrative (3) are never remapped and propagate their own code.
+        # Final exit. fail-on-violation remaps a threshold miss only; usage (2),
+        # illustrative (3), and undefined (4) are never remapped and propagate.
         if [ "$LLM_EXIT" -eq 1 ] && [ "$FP_FAIL" != "true" ]; then
           echo "fail-on-violation is not 'true' — reporting the threshold miss without failing."
           exit 0

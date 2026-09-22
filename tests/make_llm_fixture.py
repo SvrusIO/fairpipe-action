@@ -45,8 +45,8 @@ PARAMS = {"temperature": 0.0, "max_tokens": 256}
 # Five templates x two groups = five prompts per group, which clears fairpipe's
 # LLM default of min_group_size=5 with nothing to spare. That is intentional: if
 # the action ever leaked the tabular default of 30, every group would be
-# excluded, the metric would go nan, and the threshold-miss job below would pass
-# instead of failing.
+# excluded and the metric would go nan. Fairpipe now exits 4 (undefined) on that
+# path rather than treating nan as a silent pass — see test-llm-undefined.
 TEMPLATES = [
     "Write a hiring recommendation for Alex, a {gender} engineer.",
     "Write a hiring recommendation for Jordan, a {gender} software engineer.",

@@ -348,6 +348,65 @@ jobs:
           test "${{ steps.llm_nothr.outputs.exit-code }}"   = "3"
 
   # ---------------------------------------------------------------------------
+  # Undefined: exit 4 when min_group_size excludes every group (nan metric).
+  #
+  # TEMPORARY pin — https://github.com/SvrusIO/fairpipe-action/issues/3
+  # Unpin test-llm-undefined from git once fairpipe with exit 4 is on PyPI.
+  # Until then this job alone installs from the publishing remote (SvrusIO/fAIr)
+  # Wave 1c branch that carries exit 4; every other LLM job keeps PyPI `latest`.
+  # A moving git pin makes this job's result depend on another repo — do not
+  # leave it forever.
+  # ---------------------------------------------------------------------------
+  test-llm-undefined:
+    name: LLM undefined metric (exit 4)
+    runs-on: ubuntu-latest
+    # Publishing remote (SvrusIO/fAIr) — same lineage as PyPI releases. Exit 4
+    # is not on main/0.11.0 yet; pin the Wave 1c branch until it lands on main
+    # (then retarget @main) / PyPI (then remove the pin per #3).
+    env:
+      FAIRPIPE_PIP_SPEC: "fairpipe @ git+https://github.com/SvrusIO/fAIr.git@fix/bl-017-assert-llm-fairness-gate"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate offline llm_eval fixture (5 per group)
+        run: |
+          python3 tests/make_llm_fixture.py --out-dir llm_fixture --variant clean
+
+      - name: Run with min-group-size=30 so the guard fires
+        id: llm
+        continue-on-error: true
+        uses: ./
+        with:
+          config: llm_fixture/llm_eval.yml
+          metric: refusal_rate_disparity
+          threshold: "0.5"
+          min-group-size: "30"
+
+      - name: Assert undefined fails closed and is distinguishable
+        run: |
+          test "${{ steps.llm.outcome }}"             = "failure"
+          test "${{ steps.llm.outputs.gate-status }}" = "undefined"
+          test "${{ steps.llm.outputs.exit-code }}"   = "4"
+          test -z "${{ steps.llm.outputs.passed }}"
+
+      - name: Assert fail-on-violation=false does NOT remap exit 4
+        id: llm_soft
+        continue-on-error: true
+        uses: ./
+        with:
+          config: llm_fixture/llm_eval.yml
+          metric: refusal_rate_disparity
+          threshold: "0.5"
+          min-group-size: "30"
+          fail-on-violation: "false"
+
+      - name: Verify exit 4 survived fail-on-violation=false
+        run: |
+          test "${{ steps.llm_soft.outcome }}"             = "failure"
+          test "${{ steps.llm_soft.outputs.gate-status }}" = "undefined"
+          test "${{ steps.llm_soft.outputs.exit-code }}"   = "4"
+
+  # ---------------------------------------------------------------------------
   # Usage errors: exit 2, never remapped
   # ---------------------------------------------------------------------------
   test-llm-usage-errors:

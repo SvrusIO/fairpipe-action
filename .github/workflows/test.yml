@@ -353,18 +353,19 @@ jobs:
   # TEMPORARY pin — https://github.com/SvrusIO/fairpipe-action/issues/3
   # Unpin test-llm-undefined from git once fairpipe with exit 4 is on PyPI.
   # Until then this job alone installs from the publishing remote (SvrusIO/fAIr)
-  # Wave 1c branch that carries exit 4; every other LLM job keeps PyPI `latest`.
-  # A moving git pin makes this job's result depend on another repo — do not
-  # leave it forever.
+  # Wave 1 merge commit on main (SHA pin so deleting feature branches is safe);
+  # every other LLM job keeps PyPI `latest`. A moving git pin makes this job's
+  # result depend on another repo — do not leave it forever.
   # ---------------------------------------------------------------------------
   test-llm-undefined:
     name: LLM undefined metric (exit 4)
     runs-on: ubuntu-latest
-    # Publishing remote (SvrusIO/fAIr) — same lineage as PyPI releases. Exit 4
-    # is not on main/0.11.0 yet; pin the Wave 1c branch until it lands on main
-    # (then retarget @main) / PyPI (then remove the pin per #3).
+    # Publishing remote (SvrusIO/fAIr). Exit 4 is on main as of Wave 1 merge
+    # 66d3cf1ebe2aff78f5db0231a66b732ada7e8563; pin that SHA until PyPI ships it
+    # (then remove the pin per #3). Prefer SHA over @main so the pin does not
+    # drift if main moves before the release.
     env:
-      FAIRPIPE_PIP_SPEC: "fairpipe @ git+https://github.com/SvrusIO/fAIr.git@fix/bl-017-assert-llm-fairness-gate"
+      FAIRPIPE_PIP_SPEC: "fairpipe @ git+https://github.com/SvrusIO/fAIr.git@66d3cf1ebe2aff78f5db0231a66b732ada7e8563"
     steps:
       - uses: actions/checkout@v4
 

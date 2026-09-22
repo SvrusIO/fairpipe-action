@@ -38,7 +38,7 @@ The mode is inferred from which input you set. Setting both `csv` and `config`, 
     fail-on-violation: "true"
 ```
 
-Requires fairpipe **0.10.0 or later**, which is when `fairpipe llm-eval` was added. The action checks this after install and fails with a direct message rather than letting the CLI report an unrecognised subcommand. The examples gate `refusal_rate_disparity` so a caveated (illustrative) fixture can return exit 3 on released 0.10.0 — `counterfactual_fairness_divergence` does not attach caveats until a later toolkit release.
+Requires fairpipe **0.10.0 or later**, which is when `fairpipe llm-eval` was added. The action checks this after install and fails with a direct message rather than letting the CLI report an unrecognised subcommand. The examples gate `refusal_rate_disparity` so a caveated (illustrative) fixture can return exit 3 on released 0.10.0 — `demographic_swap_divergence` does not attach caveats until a later toolkit release.
 
 ---
 

@@ -96,7 +96,7 @@ inputs:
       mae_parity_difference if only score is set.
 
       llm-fairness-check mode: an llm_eval evaluator key, e.g.
-      counterfactual_fairness_divergence, refusal_rate_disparity,
+      demographic_swap_divergence, refusal_rate_disparity,
       toxicity_sentiment_disparity, stereotype_association_score. It must be one
       of the evaluators your config declares. Required when `threshold` is set.
       No default — the tabular default is not a valid LLM evaluator.

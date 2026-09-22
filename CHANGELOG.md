@@ -16,7 +16,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   exit 4 would fall through the Action's unknown-exit fallback to `usage-error`.
 - Offline CI job `test-llm-undefined` (clean fixture + `min-group-size: "30"` → exit 4).
   Temporarily pins that job alone to unreleased fairpipe via `FAIRPIPE_PIP_SPEC` (git
-  install from `SvrusIO/fAIr`); see the unpin issue. Other LLM jobs stay on PyPI `latest`.
+  install from `SvrusIO/fAIr` at Wave 1 merge SHA
+  `66d3cf1ebe2aff78f5db0231a66b732ada7e8563` — was the Wave 1c branch; SHA so branch
+  deletion is safe). Remove when exit 4 is on PyPI ([#3](https://github.com/SvrusIO/fairpipe-action/issues/3)).
+  Other LLM jobs stay on PyPI `latest`.
 
 ### Changed
 

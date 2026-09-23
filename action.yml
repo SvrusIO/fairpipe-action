@@ -371,7 +371,7 @@ runs:
         # `|| true` keeps an empty match from aborting under `set -e -o pipefail`
         # so the N/A fallback below can run (regression reports have no DPD row).
         METRIC_VALUE=$(grep -iE "${FP_METRIC}" "$REPORT_PATH" \
-          | grep -oP '[-+]?[0-9]*\.?[0-9]+' | head -1 || true)
+          | grep -oE '[-+]?[0-9]*\.?[0-9]+' | head -1 || true)
         [ -z "$METRIC_VALUE" ] && METRIC_VALUE="N/A"
 
         # Keep DPD separately for backward compatibility
@@ -379,7 +379,7 @@ runs:
           DPD="$METRIC_VALUE"
         else
           DPD=$(grep -iE "demographic.parity.difference" "$REPORT_PATH" \
-            | grep -oP '[-+]?[0-9]*\.?[0-9]+' | head -1 || true)
+            | grep -oE '[-+]?[0-9]*\.?[0-9]+' | head -1 || true)
           [ -z "$DPD" ] && DPD="N/A"
         fi
 

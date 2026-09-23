@@ -57,7 +57,7 @@ Tagged at merge commit `b629800` (PR [#2](https://github.com/SvrusIO/fairpipe-ac
 
 ### Known issues
 
-- Tabular metric parsing still uses `grep -oP` (GNU-only). See [#1](https://github.com/SvrusIO/fairpipe-action/issues/1). Not fixed in v2.
+- Tabular metric parsing uses `grep -oE` so macOS BSD grep can read the number. See [#1](https://github.com/SvrusIO/fairpipe-action/issues/1).
 
 ---
 
